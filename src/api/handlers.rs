@@ -1,6 +1,7 @@
 use axum::extract::{ConnectInfo, Json, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use std::fs::File;
 use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -95,6 +96,7 @@ impl TokenBucket {
 pub struct Template {
     pub snapshot: VmSnapshot,
     pub memfd: i32,
+    pub block_file: Option<Arc<File>>,
 }
 
 pub struct AppState {
@@ -325,7 +327,7 @@ fn execute_code(state: &AppState, req: &ExecRequest, request_id: &str) -> ExecRe
                 };
             }
         };
-        let mut vm = match ForkedVm::fork_cow(&template.snapshot, template.memfd) {
+        let mut vm = match ForkedVm::fork_cow(&template.snapshot, template.memfd, template.block_file.clone()) {
             Ok(vm) => vm,
             Err(e) => {
                 state.metrics.total_errors.fetch_add(1, Ordering::Relaxed);
