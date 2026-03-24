@@ -165,16 +165,16 @@ EOF
 cd ~/zeroboot-rootfs
 
 # 构建镜像（~3 分钟，主要是 pip install）
-docker build -t zeroboot-rootfs .
+sudo docker build -t zeroboot-rootfs .
 
 # 验证 init 编译结果
-docker run --rm zeroboot-rootfs ldd /init
+sudo docker run --rm zeroboot-rootfs ldd /init
 # 期望：/init: ELF 64-bit LSB executable ... statically linked, stripped
 
 # 导出为 tar
-docker create --name tmp-rootfs zeroboot-rootfs
-docker export tmp-rootfs -o rootfs.tar
-docker rm tmp-rootfs
+sudo docker create --name tmp-rootfs zeroboot-rootfs
+sudo docker export tmp-rootfs -o rootfs.tar
+sudo docker rm tmp-rootfs
 
 # 打包成 ext4 镜像
 cd ~/fc-exp
@@ -205,7 +205,8 @@ sudo umount /mnt/rootfs_out
 ## 五、编译 Zeroboot
 
 ```bash
-# 安装 Rust（如果没有）
+# 安装依赖（C 编译器 + Rust）
+sudo apt-get install -y build-essential
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source ~/.cargo/env
 
