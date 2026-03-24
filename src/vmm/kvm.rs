@@ -43,6 +43,11 @@ pub struct ForkedVm {
     _kvm: Kvm,
 }
 
+// Safety: mem_ptr points to a private mmap region owned exclusively by this ForkedVm.
+// No other thread can access it without going through ForkedVm methods.
+// SAFETY: ForkedVm is never shared across threads without external synchronization.
+unsafe impl Send for ForkedVm {}
+unsafe impl Sync for ForkedVm {}
 
 impl ForkedVm {
     pub fn fork_cow(snapshot: &VmSnapshot, memfd: i32, block_file: Option<Arc<File>>) -> Result<Self> {
