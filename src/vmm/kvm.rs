@@ -260,10 +260,11 @@ impl ForkedVm {
             }
             // Create a per-thread timer using CLOCK_THREAD_CPUTIME_ID won't work
             // across threads, so use a helper thread that sleeps then signals us.
-            let thread_id = unsafe { libc::pthread_self() };
+            // Cast pthread_t to usize so the closure is Send (pthread_t is *mut c_void on musl)
+            let thread_id = unsafe { libc::pthread_self() } as usize;
             let handle = std::thread::spawn(move || {
                 std::thread::sleep(dur);
-                unsafe { libc::pthread_kill(thread_id, libc::SIGALRM); }
+                unsafe { libc::pthread_kill(thread_id as libc::pthread_t, libc::SIGALRM); }
             });
             Some(handle)
         } else {
