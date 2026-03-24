@@ -32,15 +32,27 @@ role is capacity management: health checks, rolling updates, and horizontal scal
 Not all EC2 instance types expose `/dev/kvm`. The following families support KVM
 and are suitable for zeroboot:
 
-| Family | Notes |
-|---|---|
-| `c6i`, `c6a`, `c7i`, `c8i` | ✅ Recommended — Nitro-based, no nested virt needed |
-| `m6i`, `m7i`, `m8i` | ✅ General-purpose, KVM available |
-| `r6i`, `r7i` | ✅ Memory-optimized — good for high snapshot concurrency |
-| `c5`, `m5` | ✅ Older Nitro generation, still works |
-| `t3`, `t4g` | ❌ Burstable — `/dev/kvm` not available |
-| `t2` | ❌ No KVM |
-| Any ARM (`*g`) | ❌ Architecture mismatch — Firecracker x86_64 binary required |
+| Family | KVM method | Notes |
+|---|---|---|
+| `c8i`, `m8i`, `r8i` | ✅ **Nested virtualization** | **Recommended** — Intel 8th-gen Nitro platform; supports nested virt without metal. Enable at launch via `--cpu-options NestedVirtualization=enabled` (requires AWS CLI ≥ v2.34) |
+| `c6i`, `c6a`, `c7i`, `m6i`, `m7i`, `r6i`, `r7i` | ✅ Bare-metal only | KVM available only on `.metal` sizes (e.g. `c6i.metal`) |
+| `c5`, `m5`, `r5` | ✅ Bare-metal only | Older Nitro generation; `.metal` sizes only |
+| `t3`, `t4g` | ❌ Not available | Burstable — `/dev/kvm` not exposed |
+| `t2` | ❌ Not available | No Nitro, no KVM |
+| Any ARM (`*g`) | ❌ Architecture mismatch | Firecracker x86_64 binary required |
+
+**TL;DR for EKS node groups:** Use `c8i`, `m8i`, or `r8i` with nested virtualization
+enabled — these are the only non-metal families where regular (non-`.metal`) instance
+sizes expose `/dev/kvm`. All other families require `.metal` sizes which are significantly
+more expensive and harder to schedule in K8s.
+
+```bash
+# Enable nested virtualization when launching a new instance (c8i/m8i/r8i only)
+aws ec2 run-instances \
+  --instance-type c8i.xlarge \
+  --cpu-options "NestedVirtualization=enabled" \
+  ...
+```
 
 > On GCP: `n2`, `n2d`, `c2`, `c3` families support KVM.
 > On Azure: `Dv3`, `Ev3`, `Dsv3` with nested virtualization enabled.
