@@ -132,7 +132,7 @@ RUN apt-get update -qq && \
 COPY init.c /init.c
 RUN gcc -O2 -static -o /init /init.c && \
     rm /init.c && \
-    file /init  # 验证：ELF 64-bit ... statically linked
+
 EOF
 ```
 
