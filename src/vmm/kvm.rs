@@ -399,28 +399,6 @@ impl Drop for ForkedVm {
     }
 }
 
-pub fn create_snapshot_memfd(mem_ptr: *const u8, mem_size: usize) -> Result<i32> {
-    let name = std::ffi::CString::new("zeroboot-snapshot").unwrap();
-    let fd = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 { bail!("memfd_create failed"); }
-    if unsafe { libc::ftruncate(fd, mem_size as i64) } < 0 {
-        unsafe { libc::close(fd); }
-        bail!("ftruncate failed");
-    }
-    let dst = unsafe {
-        libc::mmap(ptr::null_mut(), mem_size, libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED, fd, 0)
-    };
-    if dst == libc::MAP_FAILED {
-        unsafe { libc::close(fd); }
-        bail!("mmap failed");
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(mem_ptr, dst as *mut u8, mem_size);
-        libc::munmap(dst, mem_size);
-    }
-    Ok(fd)
-}
 
 /// Create a snapshot memfd by copying directly from a file using copy_file_range.
 /// This avoids allocating a user-space buffer for the entire snapshot memory,
