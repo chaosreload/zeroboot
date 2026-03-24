@@ -393,10 +393,18 @@ fn execute_code(state: &AppState, req: &ExecRequest, request_id: &str) -> ExecRe
         let has_marker = output.contains("ZEROBOOT_DONE");
         let mut stdout = output.replace("ZEROBOOT_DONE", "").replace("\r\n", "\n").replace("\r", "");
         if let Some(pos) = stdout.find('\n') {
-            if stdout[..pos].trim() == req.code.trim() {
+            let echo_prefix = format!("CODE:{}", req.code.trim());
+            if stdout[..pos].trim() == echo_prefix.trim() {
                 stdout = stdout[pos+1..].to_string();
             }
         }
+
+        // Filter kernel log lines (e.g. "[18446744073.xxx] random: ...")
+        stdout = stdout.lines()
+            .filter(|l| !(l.trim_start().starts_with('[') && l.contains("] ")))
+            .collect::<Vec<_>>()
+            .join("
+");
 
         let (exit_code, stderr) = if has_marker {
             (0, String::new())
