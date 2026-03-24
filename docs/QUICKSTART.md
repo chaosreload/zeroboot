@@ -7,25 +7,57 @@
 
 ## 一、机器准备
 
-### 1.1 开启嵌套虚拟化（已有 EC2 实例）
+### 1.1 启动新实例（推荐方式）
+
+直接在 `run-instances` 时通过 `--cpu-options` 一步开启嵌套虚拟化，无需 stop/start 两次操作。
+
+> ⚠️ 需要 AWS CLI >= v2.34，旧版本不支持 `NestedVirtualization` 参数
 
 ```bash
-# 先停止实例（在 AWS Console 或 CLI）
-aws ec2 stop-instances --region ap-southeast-1 --instance-ids i-XXXXXXXXX
+# 获取最新 Ubuntu 22.04 AMI（ap-southeast-1）
+AMI_ID=$(aws ec2 describe-images \
+  --owners 099720109477 \
+  --filters 'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*' \
+            'Name=state,Values=available' \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+  --region ap-southeast-1 --output text)
 
-# 开启嵌套虚拟化（需要 AWS CLI >= 2.34）
-aws ec2 modify-instance-cpu-options \
+# 启动实例，直接开嵌套虚拟化
+INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id $AMI_ID \
+  --instance-type c8i.xlarge \
+  --key-name <your-key-name> \
+  --security-group-ids <your-sg-id> \
+  --cpu-options "NestedVirtualization=enabled" \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=zeroboot-fresh}]' \
   --region ap-southeast-1 \
-  --instance-id i-XXXXXXXXX \
-  --nested-virtualization enabled
+  --query 'Instances[0].InstanceId' --output text)
 
-# 重新启动
-aws ec2 start-instances --region ap-southeast-1 --instance-ids i-XXXXXXXXX
+echo "Instance ID: $INSTANCE_ID"
+
+# 等待启动完成
+aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ap-southeast-1
 ```
 
-> ⚠️ 只有 c8i / m8i / r8i 系列支持嵌套虚拟化
+> ⚠️ 只有 c8i / m8i / r8i 系列支持嵌套虚拟化（均为 Intel 第 8 代平台）
 
-### 1.2 验证 KVM 可用
+### 1.2 已有实例启用嵌套虚拟化
+
+如果你已有运行中的 C8i 实例，需要先停机再改配置：
+
+```bash
+aws ec2 stop-instances --region ap-southeast-1 --instance-ids $INSTANCE_ID
+aws ec2 wait instance-stopped --region ap-southeast-1 --instance-ids $INSTANCE_ID
+
+aws ec2 modify-instance-cpu-options \
+  --region ap-southeast-1 \
+  --instance-id $INSTANCE_ID \
+  --nested-virtualization enabled
+
+aws ec2 start-instances --region ap-southeast-1 --instance-ids $INSTANCE_ID
+```
+
+### 1.3 验证 KVM 可用
 
 ```bash
 ssh ubuntu@<your-instance-ip>
@@ -69,73 +101,85 @@ ls -lh vmlinux.bin
 
 ---
 
-## 四、制作 Ubuntu 22.04 Rootfs
+## 四、用 Docker 构建 Rootfs
 
-这一步需要 ~5 分钟，制作一个含 Python 3.10 + numpy + pandas 的根文件系统。
+使用 Docker 构建 rootfs，比 debootstrap 更可复现、更易维护（类似 E2B sandbox template 的方式）。
 
-```bash
-# 安装 debootstrap（如果没有）
-sudo apt-get install -y debootstrap
+> 需要先安装 Docker：`sudo apt-get install -y docker.io && sudo usermod -aG docker $USER && newgrp docker`
 
-# Step 1：创建 Ubuntu 22.04 最小系统
-sudo mkdir -p /tmp/rootfs_build
-sudo debootstrap --arch=amd64 jammy /tmp/rootfs_build http://archive.ubuntu.com/ubuntu/
-
-# Step 2：添加 universe 源（pip 在这里）
-echo "deb http://archive.ubuntu.com/ubuntu jammy main universe" | \
-  sudo tee /tmp/rootfs_build/etc/apt/sources.list
-
-# Step 3：安装 Python + 科学包
-sudo chroot /tmp/rootfs_build apt-get update -qq
-sudo chroot /tmp/rootfs_build apt-get install -y python3 python3-pip gcc
-sudo chroot /tmp/rootfs_build pip3 install numpy pandas
-# 验证
-sudo chroot /tmp/rootfs_build python3 -c "import numpy; print('numpy', numpy.__version__)"
-sudo chroot /tmp/rootfs_build python3 -c "import pandas; print('pandas', pandas.__version__)"
-```
-
----
-
-## 五、编译 Guest Init
+### 4.1 创建 Dockerfile
 
 ```bash
-# 下载 init.c（从我们的 fork）
-curl -fsSL -o /tmp/rootfs_build/init.c \
+mkdir -p ~/zeroboot-rootfs
+cd ~/zeroboot-rootfs
+
+# 下载 init.c（静态编译的 guest init）
+curl -fsSL -o init.c \
   https://raw.githubusercontent.com/chaosreload/zeroboot/feat/virtio-blk-filesystem/guest/init.c
 
-# 编译（静态链接，无依赖）
-sudo chroot /tmp/rootfs_build gcc -O2 -static -o /init /init.c
-sudo rm /tmp/rootfs_build/init.c
+cat > Dockerfile << 'EOF'
+FROM ubuntu:22.04
 
-# 验证
-sudo file /tmp/rootfs_build/init
-# 期望：ELF 64-bit LSB executable ... statically linked
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+      python3 python3-pip gcc libc6-dev && \
+    pip3 install --no-cache-dir numpy pandas && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 编译静态 init（guest 的 PID 1）
+COPY init.c /init.c
+RUN gcc -O2 -static -o /init /init.c && \
+    rm /init.c && \
+    file /init  # 验证：ELF 64-bit ... statically linked
+EOF
 ```
 
----
-
-## 六、打包 Rootfs
+### 4.2 构建并导出为 ext4
 
 ```bash
-cd ~/fc-exp
+cd ~/zeroboot-rootfs
 
-# 创建 1.5GB ext4 镜像
+# 构建镜像（~3 分钟，主要是 pip install）
+docker build -t zeroboot-rootfs .
+
+# 验证 init 编译结果
+docker run --rm zeroboot-rootfs file /init
+# 期望：/init: ELF 64-bit LSB executable ... statically linked, stripped
+
+# 导出为 tar
+docker create --name tmp-rootfs zeroboot-rootfs
+docker export tmp-rootfs -o rootfs.tar
+docker rm tmp-rootfs
+
+# 打包成 ext4 镜像
+cd ~/fc-exp
 dd if=/dev/zero of=rootfs.ext4 bs=1M count=1500 status=progress
 mkfs.ext4 -F rootfs.ext4
 
-# 写入内容
 sudo mkdir -p /mnt/rootfs_out
 sudo mount -o loop rootfs.ext4 /mnt/rootfs_out
-sudo cp -a /tmp/rootfs_build/. /mnt/rootfs_out/
+sudo tar xf ~/zeroboot-rootfs/rootfs.tar -C /mnt/rootfs_out
 sudo umount /mnt/rootfs_out
 
 ls -lh rootfs.ext4
 # 期望：~1.5GB 文件
 ```
 
+### 4.3 验证 rootfs 内容
+
+```bash
+# 挂载检查
+sudo mount -o loop,ro rootfs.ext4 /mnt/rootfs_out
+sudo chroot /mnt/rootfs_out python3 -c "import numpy, pandas; print('numpy', numpy.__version__, 'pandas', pandas.__version__)"
+sudo chroot /mnt/rootfs_out file /init
+sudo umount /mnt/rootfs_out
+```
+
 ---
 
-## 七、编译 Zeroboot
+## 五、编译 Zeroboot
 
 ```bash
 # 安装 Rust（如果没有）
@@ -156,7 +200,7 @@ ls -lh target/release/zeroboot
 
 ---
 
-## 八、创建 Template（拍 Snapshot）
+## 六、创建 Template（拍 Snapshot）
 
 ```bash
 # 释放内存缓存（避免 OOM）
@@ -196,9 +240,9 @@ cat ~/zeroboot-work/rootfs_path
 
 ---
 
-## 九、测试执行
+## 七、测试执行
 
-### 9.1 基本 echo
+### 7.1 基本 echo
 
 ```bash
 echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
@@ -212,14 +256,14 @@ echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 # ZEROBOOT_DONE
 ```
 
-### 9.2 读取文件（验证文件系统）
+### 7.2 读取文件（验证文件系统）
 
 ```bash
 ~/zeroboot/target/release/zeroboot test-exec ~/zeroboot-work "cat /etc/os-release"
 # 期望：输出 Ubuntu 22.04 版本信息
 ```
 
-### 9.3 执行 Python 代码
+### 7.3 执行 Python 代码
 
 ```bash
 # 简单计算
@@ -239,7 +283,7 @@ echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
 ---
 
-## 十、性能 Benchmark
+## 八、性能 Benchmark
 
 ```bash
 echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
@@ -253,7 +297,7 @@ echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 
 ---
 
-## 十一、启动 API Server
+## 九、启动 API Server
 
 ```bash
 ~/zeroboot/target/release/zeroboot serve ~/zeroboot-work 8080
@@ -277,7 +321,7 @@ curl -X POST localhost:8080/v1/exec \
 
 ---
 
-## 十二、理解核心流程
+## 十、理解核心流程
 
 ```
 你运行 test-exec/serve
@@ -307,10 +351,13 @@ A: 机器没开嵌套虚拟化，参考第一步。
 A: 先运行 `echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null` 清理 page cache。
 
 **Q: `echo hello` 正常但 `CODE:` 卡住**  
-A: Snapshot 等待时间太短，Python 还没启动就拍快照了。增大 `wait_secs`（第八步最后一个参数）到 15 秒。
+A: Snapshot 等待时间太短，Python 还没启动就拍快照了。增大 `wait_secs`（第六步最后一个参数）到 15 秒。
 
 **Q: `Warning: snapshot CPUID rejected`**  
 A: 嵌套虚拟化环境限制，不影响功能，用 `2>/dev/null` 过滤即可。
 
 **Q: `Too many open files (os error 24)`（1000 并发 bench 时）**  
 A: `ulimit -n 65535` 增大文件句柄限制。
+
+**Q: AWS CLI 报 `Unknown parameter in CpuOptions: NestedVirtualization`**  
+A: 升级 AWS CLI 到 v2.34+，旧版本不支持该参数。
