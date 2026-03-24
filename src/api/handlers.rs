@@ -344,7 +344,8 @@ fn execute_code(state: &AppState, req: &ExecRequest, request_id: &str) -> ExecRe
         state.metrics.fork_time_hist.observe(vm.fork_time_us / 1000.0);
 
         let exec_start = Instant::now();
-        let command = format!("{}\n", req.code);
+        let command = format!("CODE:{}
+", req.code);
         if let Err(e) = vm.send_serial(command.as_bytes()) {
             state.metrics.total_errors.fetch_add(1, Ordering::Relaxed);
             return ExecResponse {
