@@ -130,8 +130,7 @@ RUN apt-get update -qq && \
 
 # 编译静态 init（guest 的 PID 1）
 COPY init.c /init.c
-RUN gcc -O2 -static -o /init /init.c && \
-    rm /init.c && \
+RUN gcc -O2 -static -o /init /init.c && rm /init.c
 
 EOF
 ```
