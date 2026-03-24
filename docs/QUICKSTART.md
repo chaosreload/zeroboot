@@ -144,7 +144,7 @@ cd ~/zeroboot-rootfs
 docker build -t zeroboot-rootfs .
 
 # 验证 init 编译结果
-docker run --rm zeroboot-rootfs file /init
+docker run --rm zeroboot-rootfs ldd /init
 # 期望：/init: ELF 64-bit LSB executable ... statically linked, stripped
 
 # 导出为 tar
@@ -172,7 +172,7 @@ ls -lh rootfs.ext4
 # 挂载检查
 sudo mount -o loop,ro rootfs.ext4 /mnt/rootfs_out
 sudo chroot /mnt/rootfs_out python3 -c "import numpy, pandas; print('numpy', numpy.__version__, 'pandas', pandas.__version__)"
-sudo chroot /mnt/rootfs_out file /init
+sudo chroot /mnt/rootfs_out ldd /init
 sudo umount /mnt/rootfs_out
 ```
 
