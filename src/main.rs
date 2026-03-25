@@ -29,7 +29,7 @@ fn main() -> Result<()> {
             eprintln!(
                 "  test-exec <workdir> <command>         - Test executing a command in a fork"
             );
-            eprintln!("  serve <workdir> [port] [--bind addr]  - Start API server (default bind: 0.0.0.0)");
+            eprintln!("  serve <workdir> [port]                - Start API server");
             Ok(())
         }
     }
@@ -390,25 +390,9 @@ fn load_api_keys() -> Vec<String> {
 
 fn cmd_serve(args: &[String]) -> Result<()> {
     if args.len() < 1 {
-        bail!("Usage: zeroboot serve <workdir>[,lang:workdir2,...] [port] [--bind <addr>]");
+        bail!("Usage: zeroboot serve <workdir>[,lang:workdir2,...] [port]");
     }
     let port: u16 = args.get(1).and_then(|p| p.parse().ok()).unwrap_or(8080);
-
-    // Parse optional --bind flag (default 0.0.0.0 for Kubernetes compatibility).
-    // K8s health probes and Service ClusterIP routing require the server to listen
-    // on all interfaces, not just localhost.
-    let bind_addr = {
-        let mut addr = "0.0.0.0".to_string();
-        let mut i = 2;
-        while i + 1 < args.len() {
-            if args[i] == "--bind" {
-                addr = args[i + 1].clone();
-                break;
-            }
-            i += 1;
-        }
-        addr
-    };
 
     // Parse workdir specs: "workdir" or "python:workdir1,node:workdir2"
     let mut templates = std::collections::HashMap::new();
@@ -446,10 +430,10 @@ fn cmd_serve(args: &[String]) -> Result<()> {
             .route("/v1/metrics", axum::routing::get(metrics_handler))
             .with_state(state);
 
-        let listener = tokio::net::TcpListener::bind(format!("{}:{}", bind_addr, port))
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
             .await
             .unwrap();
-        eprintln!("Zeroboot API server listening on {}:{}", bind_addr, port);
+        eprintln!("Zeroboot API server listening on port {}", port);
         axum::serve(
             listener,
             app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
