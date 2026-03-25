@@ -9,7 +9,7 @@
 # See deploy/k8s/ for Kubernetes manifests.
 
 # ─── Stage 1: Build zeroboot binary ──────────────────────────────────────────
-FROM rust:1.80-bookworm AS builder
+FROM rust:1.86-bookworm AS builder
 
 WORKDIR /build
 

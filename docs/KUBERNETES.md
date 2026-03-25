@@ -68,6 +68,65 @@ where `/dev/kvm` is available.
 
 ---
 
+---
+
+## EKS deployment: managed vs self-managed node groups
+
+> **TL;DR:** Use a self-managed node group. EKS managed node groups silently
+> drop `CpuOptions.NestedVirtualization` — your nodes will start without `/dev/kvm`.
+
+### The problem with managed node groups
+
+EKS managed node groups take your Launch Template, then generate a new internal
+Launch Template that merges only a subset of fields. `CpuOptions` is not in that
+subset — even though it is **not** listed in the [official blocked-fields docs](https://docs.aws.amazon.com/eks/latest/userguide/launch-templates.html#launch-template-basics).
+
+Symptoms:
+- `ls /dev/kvm` returns "No such file or directory"
+- `/proc/cpuinfo` has no `vmx` flag
+- `eksctl create nodegroup` succeeds, but KVM is silently missing
+
+You can verify by inspecting the EKS-generated internal Launch Template:
+
+```bash
+# Get the internal LT id (not your LT)
+aws ec2 describe-launch-template-versions   --launch-template-id <EKS_GENERATED_LT_ID> --versions 1   --query "LaunchTemplateVersions[0].LaunchTemplateData.CpuOptions"
+# Expected for managed nodegroup: null  (even if you set it in your own LT)
+```
+
+### The solution: self-managed node group
+
+Create an Auto Scaling Group with a Launch Template directly — bypassing EKS's
+internal LT generation. The provided script handles the full setup:
+
+```bash
+export AWS_PROFILE=your-profile
+export CLUSTER_NAME=zeroboot-eks
+export REGION=ap-southeast-1
+
+# Step 1: Create cluster without node group
+eksctl create cluster -f deploy/eks/eks-cluster-only.yaml
+
+# Step 2: Create self-managed KVM node group
+bash deploy/eks/eks-self-managed-kvm.sh
+```
+
+The script:
+1. Creates an IAM node role + instance profile
+2. Registers the role with EKS via `create-access-entry`
+3. Queries the latest EKS-optimized AL2023 AMI
+4. Creates a Launch Template with `CpuOptions.NestedVirtualization=enabled`
+5. Creates an ASG referencing the LT directly
+6. Verifies `/dev/kvm` is present on the new nodes
+
+> **Note:** `eksctl`'s `nodeGroups` (non-managed) do not support `launchTemplate`.
+> Only `managedNodeGroups` does — but managed NGs drop `CpuOptions`. The script
+> uses raw AWS CLI (`ec2 create-launch-template` + `autoscaling create-auto-scaling-group`)
+> to sidestep both limitations.
+
+
+---
+
 ## KVM device access without `privileged: true`
 
 Pods request `/dev/kvm` via the [KVM device plugin](https://github.com/kubevirt/kubevirt/tree/main/cmd/virt-handler)
@@ -279,6 +338,22 @@ All configuration is via environment variables (set in `deployment.yaml`):
 | `ZEROBOOT_PORT` | `8080` | API server port |
 | `ZEROBOOT_TEMPLATE_WAIT` | `15` | Seconds to wait during template snapshot |
 | `ZEROBOOT_API_KEYS_FILE` | _(unset)_ | Path to JSON array of API keys |
+
+---
+
+### Server bind address
+
+By default, `zeroboot serve` binds to `0.0.0.0` (all interfaces), which is
+required for Kubernetes health probes and Service routing. To restrict to
+localhost (e.g. for local development), pass `--bind 127.0.0.1`:
+
+```bash
+zeroboot serve python:/workdir/python 8080 --bind 127.0.0.1
+```
+
+The `ZEROBOOT_BIND` environment variable (default: `0.0.0.0`) controls the
+bind address when running via the Docker entrypoint.
+
 
 ---
 

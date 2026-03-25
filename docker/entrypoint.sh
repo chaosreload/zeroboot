@@ -6,6 +6,7 @@ KERNEL="${ZEROBOOT_KERNEL:-${WORKDIR}/vmlinux-fc}"
 ROOTFS_PYTHON="${ZEROBOOT_ROOTFS_PYTHON:-${WORKDIR}/rootfs-python.ext4}"
 ROOTFS_NODE="${ZEROBOOT_ROOTFS_NODE:-}"
 PORT="${ZEROBOOT_PORT:-8080}"
+BIND="${ZEROBOOT_BIND:-0.0.0.0}"
 TEMPLATE_WAIT="${ZEROBOOT_TEMPLATE_WAIT:-15}"
 
 # ── Validate KVM access ───────────────────────────────────────────────────────
@@ -66,4 +67,4 @@ fi
 
 # ── Start API server ──────────────────────────────────────────────────────────
 echo "Starting zeroboot API server on port ${PORT}..."
-exec /usr/local/bin/zeroboot serve "$SERVE_TARGET" "$PORT"
+exec /usr/local/bin/zeroboot serve "$SERVE_TARGET" "$PORT" --bind "$BIND"

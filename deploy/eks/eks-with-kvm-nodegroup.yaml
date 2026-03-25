@@ -1,3 +1,20 @@
+# ⚠️  WARNING: EKS Managed Node Groups silently drop CpuOptions
+#
+# This file uses managedNodeGroups with cpuOptions.nestedVirtualization.
+# However, EKS generates its own internal Launch Template from the user-supplied
+# one, and CpuOptions is NOT carried over — resulting in nodes WITHOUT /dev/kvm
+# even though the YAML appears correct.
+#
+# STATUS: AWS has acknowledged this as a documentation gap (CpuOptions is not in
+# the official "blocked fields" list but is still ignored in practice).
+#
+# RECOMMENDED ALTERNATIVE: Use deploy/eks/eks-self-managed-kvm.yaml instead.
+# That file creates a Self-managed Node Group (ASG + Launch Template) where
+# CpuOptions is applied directly without EKS interference.
+#
+# Use THIS file only if you have verified that your eksctl version correctly
+# passes CpuOptions through (test with: kubectl run kvm-check ... ls /dev/kvm).
+
 # Scenario 1: Create EKS cluster with KVM node group in one shot
 # Usage:
 #   eksctl create cluster -f eks-with-kvm-nodegroup.yaml

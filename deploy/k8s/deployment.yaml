@@ -40,16 +40,20 @@ spec:
             - name: http
               containerPort: 8080
 
-          # ── KVM device — avoids privileged: true ───────────────────────────
+          # ── KVM device access ──────────────────────────────────────────────
+          # Use privileged mode + hostPath mount (compatible with EKS without kubevirt).
+          # If KubeVirt device plugin is installed, you can replace this with:
+          #   resources.limits: { devices.kubevirt.io/kvm: "1" }
+          # and remove securityContext.privileged.
+          securityContext:
+            privileged: true
           resources:
             requests:
               memory: "2Gi"
               cpu: "1"
-              devices.kubevirt.io/kvm: "1"
             limits:
               memory: "8Gi"
               cpu: "4"
-              devices.kubevirt.io/kvm: "1"
 
           env:
             - name: ZEROBOOT_WORKDIR
@@ -65,6 +69,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/zeroboot
+            - name: kvm
+              mountPath: /dev/kvm
 
           # ── Health checks ──────────────────────────────────────────────────
           readinessProbe:
@@ -79,11 +85,15 @@ spec:
             httpGet:
               path: /v1/health
               port: 8080
-            initialDelaySeconds: 60
+            initialDelaySeconds: 120  # template creation takes ~19s; allow 2x margin
             periodSeconds: 10
-            failureThreshold: 3
+            failureThreshold: 6
 
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: zeroboot-data
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice
