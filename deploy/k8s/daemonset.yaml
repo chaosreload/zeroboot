@@ -1,24 +1,18 @@
-# ── Advanced deployment option ─────────────────────────────────────────────────
-# This manifest is an ALTERNATIVE to daemonset.yaml. Use it when you need:
-#   - HPA (Horizontal Pod Autoscaler) for fine-grained replica control
-#   - Manual replica count management
-#   - A single shared PVC for workdir (single-replica only; ReadWriteOnce)
-#
-# For most deployments, prefer daemonset.yaml, which automatically places one
-# pod per KVM-capable node and integrates cleanly with cluster autoscalers.
-# ──────────────────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: zeroboot
   namespace: zeroboot
   labels:
     app: zeroboot
 spec:
-  replicas: 2
   selector:
     matchLabels:
       app: zeroboot
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
@@ -29,17 +23,14 @@ spec:
         prometheus.io/path: "/v1/metrics"
     spec:
       # ── Scheduling: only run on KVM-capable nodes ───────────────────────────
+      # Label KVM-capable nodes with:
+      #   kubectl label node <node> kvm-capable=true
+      # Or if using Karpenter, set this label in your NodePool spec.
       nodeSelector:
-        kvm-capable: "true"   # label KVM nodes with: kubectl label node <node> kvm-capable=true
+        kvm-capable: "true"
 
-      # Spread pods across nodes — each pod needs its own physical memory for CoW
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app: zeroboot
-              topologyKey: kubernetes.io/hostname
+      # Graceful shutdown: allow in-flight requests to complete before pod stops
+      terminationGracePeriodSeconds: 30
 
       containers:
         - name: zeroboot
@@ -56,6 +47,7 @@ spec:
           # and remove securityContext.privileged.
           securityContext:
             privileged: true
+
           resources:
             requests:
               memory: "2Gi"
@@ -71,7 +63,7 @@ spec:
               value: "8080"
             - name: ZEROBOOT_TEMPLATE_WAIT
               value: "15"
-            # Optional: path to api_keys.json on the PVC
+            # Optional: path to api_keys.json
             # - name: ZEROBOOT_API_KEYS_FILE
             #   value: /var/lib/zeroboot/api_keys.json
 
@@ -86,7 +78,7 @@ spec:
             httpGet:
               path: /v1/health
               port: 8080
-            initialDelaySeconds: 30   # allow time for template creation on first boot
+            initialDelaySeconds: 30
             periodSeconds: 5
             failureThreshold: 6
 
@@ -99,9 +91,16 @@ spec:
             failureThreshold: 6
 
       volumes:
+        # ── Data volume (hostPath) ─────────────────────────────────────────────
+        # zeroboot's Firecracker snapshots are bound to the host CPU microarchitecture
+        # and KVM state, so local storage is the correct choice. Snapshots are
+        # rebuilt automatically on first boot (~19s); cross-node migration is not
+        # supported and not needed for short-lived sandbox workloads.
+        # DirectoryOrCreate ensures the path is created on the node if absent.
         - name: data
-          persistentVolumeClaim:
-            claimName: zeroboot-data
+          hostPath:
+            path: /var/lib/zeroboot
+            type: DirectoryOrCreate
         - name: kvm
           hostPath:
             path: /dev/kvm

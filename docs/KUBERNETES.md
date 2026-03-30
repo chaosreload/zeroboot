@@ -13,15 +13,22 @@ Internet → K8s Service
                │
         ┌──────┼──────┐
         │      │      │
-     Pod-1  Pod-2  Pod-3        ← one Pod per KVM-capable Node (podAntiAffinity)
+     Node-1  Node-2  Node-3     ← KVM-capable nodes (kvm-capable=true)
         │      │      │
-     VM VM  VM VM  VM VM        ← KVM forks happen inside the Pod, sub-millisecond
+     Pod-1   Pod-2   Pod-3      ← one Pod per Node (DaemonSet, default)
+        │      │      │
+     VM VM   VM VM   VM VM      ← KVM forks happen inside the Pod, sub-millisecond
 ```
 
 **Key point:** Kubernetes manages the lifecycle of the zeroboot *server* process.
 It does not schedule individual sandboxes — each `v1/exec` request is handled
 entirely within the Pod that receives it via a KVM fork (~0.8 ms). Kubernetes'
-role is capacity management: health checks, rolling updates, and horizontal scaling.
+role is capacity management: health checks, rolling updates, and node-level scaling.
+
+**Why DaemonSet?** zeroboot is tightly bound to the host's `/dev/kvm` and CPU
+microarchitecture. The natural unit of scale is a Node, not a Pod replica —
+adding a KVM-capable node should automatically bring up a new zeroboot instance.
+DaemonSet is the correct primitive for this semantics.
 
 ---
 
@@ -63,7 +70,7 @@ aws ec2 run-instances \
 kubectl label node <node-name> kvm-capable=true
 ```
 
-The Deployment's `nodeSelector` uses this label to ensure Pods are only scheduled
+The DaemonSet's `nodeSelector` uses this label to ensure Pods are only scheduled
 where `/dev/kvm` is available.
 
 ---
@@ -152,11 +159,46 @@ This grants `/dev/kvm` access without `privileged: true` or `hostDevice` mounts.
 
 ## Persistent storage for snapshots
 
-Zeroboot's `template` command snapshots ~512 MB of VM memory to disk. Without a
-PersistentVolume, every Pod restart triggers a ~15 s re-snapshot.
+Zeroboot's `template` command snapshots ~512 MB of VM memory to disk. Without
+persistent storage, every Pod restart triggers a ~15 s re-snapshot.
 
-Mount a PVC at `/var/lib/zeroboot` (see `deploy/k8s/pvc.yaml`). The directory
-layout on the volume:
+### DaemonSet: hostPath (default)
+
+The default `daemonset.yaml` mounts `/var/lib/zeroboot` directly from the Node:
+
+```yaml
+volumes:
+  - name: data
+    hostPath:
+      path: /var/lib/zeroboot
+      type: DirectoryOrCreate
+```
+
+**Why hostPath?** Firecracker snapshots are bound to the host CPU microarchitecture
+and KVM hypervisor state — they cannot be safely moved across nodes or restored
+on a different CPU family. Local storage is the semantically correct choice for
+this workload. `DirectoryOrCreate` ensures the path is created automatically when
+a new node joins the cluster.
+
+**Node drain / failure:** When a node is drained or fails, the Pods on that node
+stop. Active sandbox requests (in-flight `v1/exec` calls) will be interrupted and
+must be retried by the caller. The Firecracker snapshot remains on the node's disk;
+on restart, the Pod reuses the existing snapshot (~2 s startup) rather than
+rebuilding from scratch (~19 s). Cross-node snapshot migration is not supported —
+this is a deliberate trade-off for simplicity. Node-level autoscaling (Karpenter)
+handles capacity; snapshot portability is a future operator-layer enhancement.
+
+### Deployment: PVC (advanced/single-replica)
+
+The alternative `deployment.yaml` uses a PersistentVolumeClaim, appropriate when:
+- Running a single replica (PVC `accessMode: ReadWriteOnce`)
+- You need HPA or manual replica control
+
+```bash
+kubectl apply -f deploy/k8s/pvc.yaml
+```
+
+The directory layout on either storage type:
 
 ```
 /var/lib/zeroboot/
@@ -170,12 +212,12 @@ layout on the volume:
 └── api_keys.json       ← optional API key list
 ```
 
-> **Populate the volume before first deploy.** Copy `vmlinux-fc` and
-> `rootfs-python.ext4` to the PVC (e.g., via a one-shot init Job or manual
-> `kubectl cp`). The entrypoint will create the snapshot automatically on
-> first boot if it is missing.
+> **Populate the storage before first deploy.** Copy `vmlinux-fc` and
+> `rootfs-python.ext4` to each node's `/var/lib/zeroboot` (for DaemonSet) or
+> to the PVC (for Deployment) via a one-shot init Job or `kubectl cp`.
+> The entrypoint creates the snapshot automatically on first boot if missing.
 
-### Storage class recommendations
+### Storage class recommendations (Deployment/PVC only)
 
 | Cloud | StorageClass | Notes |
 |---|---|---|
@@ -190,37 +232,83 @@ latency-sensitive and benefits from SSD IOPS.
 
 ## Deploying
 
+### Option A: DaemonSet (recommended)
+
+Automatically places one zeroboot Pod on every KVM-capable node. New nodes
+join the pool automatically with no manual intervention.
+
 ```bash
 # 1. Create namespace
 kubectl apply -f deploy/k8s/namespace.yaml
 
-# 2. Create PVC
+# 2. Deploy DaemonSet + Service
+kubectl apply -f deploy/k8s/daemonset.yaml
+kubectl apply -f deploy/k8s/service.yaml
+
+# 3. Watch rollout — first boot takes ~30s for snapshot creation on each node
+kubectl rollout status daemonset/zeroboot -n zeroboot
+
+# 4. Verify (one pod per KVM-capable node)
+kubectl get pods -n zeroboot -o wide
+kubectl exec -n zeroboot ds/zeroboot -- curl -s localhost:8080/v1/health
+```
+
+### Option B: Deployment (advanced)
+
+Use when you need HPA or fine-grained replica control. Requires a PVC.
+
+```bash
+# 1. Create namespace + PVC
+kubectl apply -f deploy/k8s/namespace.yaml
 kubectl apply -f deploy/k8s/pvc.yaml
 
-# 3. Deploy (2 replicas by default)
+# 2. Deploy
 kubectl apply -f deploy/k8s/deployment.yaml
 kubectl apply -f deploy/k8s/service.yaml
 
-# 4. Watch rollout — first boot takes ~30s for template creation
+# 3. Watch rollout
 kubectl rollout status deployment/zeroboot -n zeroboot
 
-# 5. Verify
-kubectl exec -n zeroboot deploy/zeroboot -- curl -s localhost:8080/v1/health
+# 4. Apply HPA (optional, requires prometheus-adapter)
+kubectl apply -f deploy/k8s/hpa.yaml
 ```
 
 ---
 
 ## Autoscaling
 
+### DaemonSet: node-level autoscaling (recommended)
+
+With DaemonSet, the correct scaling primitive is **adding nodes**, not adding
+Pod replicas. Use Karpenter or Cluster Autoscaler to provision new KVM-capable
+nodes when load increases:
+
+```
+high load → Karpenter adds KVM node → DaemonSet schedules Pod automatically → capacity available
+```
+
+Configure Karpenter with a NodePool targeting KVM-capable instance types (see
+below). This is the semantically correct scaling model for zeroboot: one Pod
+per KVM device, scale by expanding the node pool.
+
+### Deployment: Pod-level HPA (advanced)
+
+If you use `deployment.yaml`, HPA scales Pod replicas across available KVM nodes.
+Apply `hpa.yaml` and configure `prometheus-adapter` to expose `zeroboot_concurrent_forks`.
+
+> **Note:** HPA for Deployment combined with `podAntiAffinity` means replicas
+> are bounded by the number of KVM-capable nodes. Horizontal scaling beyond node
+> count requires node-level scaling anyway — consider using DaemonSet instead.
+
 ### Why not CPU-based HPA?
 
 Zeroboot workloads are **memory-bound**, not CPU-bound. Each concurrent fork
 adds ~265 KB of CoW memory pressure. CPU utilization is a poor scaling signal.
 
-### Custom metric HPA
+### Custom metric HPA (Deployment only)
 
 The `zeroboot_concurrent_forks` gauge (exposed at `/v1/metrics`) reflects the
-number of active VM sandboxes per Pod. Use this for HPA:
+number of active VM sandboxes per Pod. Use this for HPA when running `deployment.yaml`:
 
 ```bash
 # Apply HPA (requires prometheus-adapter, see below)
@@ -359,13 +447,18 @@ bind address when running via the Docker entrypoint.
 
 ## Limitations
 
-- **Single-node fork pool:** All sandboxes on a Pod run on the same physical Node.
-  Scale out by adding Pods (and Nodes), not by resizing individual Pods.
-- **ReadWriteOnce PVC:** Each Pod needs its own PVC (`ReadWriteOnce`). If you
-  use a `StatefulSet` instead of a `Deployment`, each replica gets its own PVC
-  automatically via `volumeClaimTemplates`.
-- **Snapshot on first boot:** The first Pod startup after PVC creation takes
-  ~15–30 s while the template snapshot is created. Subsequent restarts are fast
-  (~2 s) because the snapshot is persisted on the PVC.
+- **Snapshot CPU-affinity:** Firecracker snapshots are bound to the host CPU
+  microarchitecture. Snapshots cannot be moved between nodes of different instance
+  families (e.g., c8i → c6i). Keep KVM-capable nodes homogeneous within a cluster.
+- **No cross-node sandbox migration:** Active sandbox state lives in KVM memory
+  on the host. When a node drains, in-flight requests are interrupted; callers
+  must retry. Cross-node live migration is a future operator-layer enhancement.
+- **DaemonSet + hostPath:** Data on `/var/lib/zeroboot` is local to each node.
+  On node termination, the snapshot is lost. New nodes rebuild the snapshot on
+  first boot (~19 s); subsequent restarts reuse the cached snapshot (~2 s).
+- **Deployment + ReadWriteOnce PVC:** Each Pod needs its own PVC. Running multiple
+  replicas on the same PVC is not supported. Use DaemonSet for multi-node deployments.
+- **Snapshot on first boot:** The first Pod startup after storage initialization
+  takes ~15–30 s while the template snapshot is created.
 - **x86_64 only:** Firecracker and the guest kernel are x86_64. ARM nodes are
   not supported.
