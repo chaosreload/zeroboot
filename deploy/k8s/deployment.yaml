@@ -15,7 +15,7 @@ metadata:
   labels:
     app: zeroboot
 spec:
-  replicas: 2
+  replicas: 1  # RWO PVC (ReadWriteOnce) is node-scoped; only one Pod can mount it at a time
   selector:
     matchLabels:
       app: zeroboot

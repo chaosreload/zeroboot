@@ -75,8 +75,6 @@ where `/dev/kvm` is available.
 
 ---
 
----
-
 ## EKS deployment: managed vs self-managed node groups
 
 > **TL;DR:** Use a self-managed node group. EKS managed node groups silently
@@ -145,7 +143,7 @@ kubectl apply -f https://github.com/kubevirt/kubevirt/releases/latest/download/k
 kubectl apply -f https://github.com/kubevirt/kubevirt/releases/latest/download/kubevirt-cr.yaml
 ```
 
-Once installed, Pods can request KVM access via resources (already set in `deployment.yaml`):
+Once installed, Pods can request KVM access via resources (already set in `daemonset.yaml` / `deployment.yaml`):
 
 ```yaml
 resources:
@@ -359,7 +357,7 @@ spec:
       requirements:
         - key: karpenter.k8s.aws/instance-family
           operator: In
-          values: [c6i, c7i, c8i, m6i, m7i]
+          values: [c8i, m8i, r8i]  # only these families support nested virt on non-metal sizes
         - key: karpenter.k8s.aws/instance-size
           operator: In
           values: [xlarge, 2xlarge, 4xlarge]
@@ -415,7 +413,7 @@ spec:
 
 ## Configuration reference
 
-All configuration is via environment variables (set in `deployment.yaml`):
+All configuration is via environment variables (set in `daemonset.yaml` / `deployment.yaml`):
 
 | Variable | Default | Description |
 |---|---|---|
